@@ -84,7 +84,11 @@ class Jim(object):
         if rng_key is None:
             seed = int(time.time())
             rng_key = jax.random.PRNGKey(seed)
-            logger.info("No rng_key provided. Using time-based key with seed=%d (key=%s).", seed, rng_key)
+            logger.info(
+                "No rng_key provided. Using time-based key with seed=%d (key=%s).",
+                seed,
+                rng_key,
+            )
 
         rng_key, subkey = jax.random.split(rng_key)
 
