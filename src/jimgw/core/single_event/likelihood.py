@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from flowMC.strategy.optimization import AdamOptimization
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, Float
-from typing import Callable, Optional
+from typing import Optional
 from scipy.interpolate import interp1d
 from jimgw.core.utils import log_i0
 from jimgw.core.prior import Prior
@@ -404,9 +404,8 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         f_min: Minimum frequency for likelihood evaluation.
         f_max: Maximum frequency for likelihood evaluation.
         trigger_time: GPS time of the event trigger.
-        dist_min: Minimum luminosity distance (Mpc) for marginalization grid.
-        dist_max: Maximum luminosity distance (Mpc) for marginalization grid.
-        dist_prior_fn: Callable that returns the prior density p(d_L) given d_L array.
+        dist_prior: A 1D Prior object for luminosity distance (e.g. PowerLawPrior).
+            The grid bounds are taken from the prior's xmin/xmax attributes.
         n_dist_points: Number of grid points for distance quadrature.
         ref_dist: Reference distance (Mpc). Defaults to midpoint of [dist_min, dist_max].
     """
@@ -423,9 +422,7 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         f_min: float | dict[str, float] = 0.0,
         f_max: float | dict[str, float] = float("inf"),
         trigger_time: Float = 0,
-        dist_min: float = 100.0,
-        dist_max: float = 5000.0,
-        dist_prior_fn: Optional[Callable] = None,
+        dist_prior: Optional[Prior] = None,
         n_dist_points: int = 10000,
         ref_dist: Optional[float] = None,
     ) -> None:
@@ -433,16 +430,25 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
             detectors, waveform, fixed_parameters, f_min, f_max, trigger_time
         )
 
+        if dist_prior is None:
+            raise ValueError(
+                "dist_prior must be provided. "
+                "Example: PowerLawPrior(xmin=100, xmax=5000, alpha=2, parameter_names=['d_L'])"
+            )
+
+        if not hasattr(dist_prior, "xmin") or not hasattr(dist_prior, "xmax"):
+            raise ValueError(
+                "dist_prior must have xmin and xmax attributes defining the distance bounds. "
+                "Use a bounded prior such as PowerLawPrior or UniformPrior."
+            )
+
+        dist_min = float(dist_prior.xmin)
+        dist_max = float(dist_prior.xmax)
+
         if dist_max <= dist_min:
-            raise ValueError("dist_max must be greater than dist_min")
+            raise ValueError("dist_prior.xmax must be greater than dist_prior.xmin")
         if n_dist_points < 2:
             raise ValueError("n_dist_points must be at least 2")
-
-        if dist_prior_fn is None:
-            raise ValueError(
-                "dist_prior_fn must be provided. "
-                "Example: lambda d: 3 * d**2 / (d_max**3 - d_min**3)"
-            )
 
         if ref_dist is None:
             self.ref_dist = (dist_min + dist_max) / 2.0
@@ -453,8 +459,9 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         delta_d = (dist_max - dist_min) / (n_dist_points - 1)
         self.scaling = self.ref_dist / distance_grid
 
-        prior_values = dist_prior_fn(distance_grid)
-        log_w = jnp.log(prior_values) + jnp.log(delta_d)
+        param_name = dist_prior.parameter_names[0]
+        log_prob_fn = jax.vmap(lambda d: dist_prior.log_prob({param_name: d}))
+        log_w = log_prob_fn(distance_grid) + jnp.log(delta_d)
         self.log_weights = log_w - logsumexp(log_w)
 
     def evaluate(self, params: dict[str, Float], data: dict) -> Float:
