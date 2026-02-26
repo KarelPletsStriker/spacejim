@@ -475,7 +475,9 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         dist_max = float(getattr(dist_prior, "xmax"))
 
         if dist_min <= 0:
-            raise ValueError("The d_L prior's xmin must be > 0 (distance must be positive)")
+            raise ValueError(
+                "The d_L prior's xmin must be > 0 (distance must be positive)"
+            )
         if dist_max <= dist_min:
             raise ValueError("The d_L prior's xmax must be greater than xmin")
 
