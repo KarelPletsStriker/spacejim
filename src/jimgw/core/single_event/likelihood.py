@@ -429,6 +429,11 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
             detectors, waveform, fixed_parameters, f_min, f_max, trigger_time
         )
 
+        if dist_max <= dist_min:
+            raise ValueError("dist_max must be greater than dist_min")
+        if n_dist_points < 2:
+            raise ValueError("n_dist_points must be at least 2")
+
         if dist_prior_fn is None:
             raise ValueError(
                 "dist_prior_fn must be provided. "
@@ -441,7 +446,7 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
             self.ref_dist = ref_dist
 
         distance_grid = jnp.linspace(dist_min, dist_max, n_dist_points)
-        delta_d = (dist_max - dist_min) / n_dist_points
+        delta_d = (dist_max - dist_min) / (n_dist_points - 1)
         self.scaling = self.ref_dist / distance_grid
 
         prior_values = dist_prior_fn(distance_grid)
