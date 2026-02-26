@@ -430,6 +430,9 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
             detectors, waveform, fixed_parameters, f_min, f_max, trigger_time
         )
 
+        if "d_L" in self.fixed_parameters:
+            raise ValueError("Cannot have d_L fixed while marginalising over d_L")
+
         if dist_prior is None:
             raise ValueError(
                 "dist_prior must be provided. "
@@ -441,10 +444,17 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
                 "dist_prior must have xmin and xmax attributes defining the distance bounds. "
                 "Use a bounded prior such as PowerLawPrior or UniformPrior."
             )
+        if (
+            not hasattr(dist_prior, "parameter_names")
+            or len(dist_prior.parameter_names) != 1
+        ):
+            raise ValueError("dist_prior must be 1D with exactly one parameter name")
 
         dist_min = float(dist_prior.xmin)
         dist_max = float(dist_prior.xmax)
 
+        if dist_min <= 0:
+            raise ValueError("dist_prior.xmin must be > 0")
         if dist_max <= dist_min:
             raise ValueError("dist_prior.xmax must be greater than dist_prior.xmin")
         if n_dist_points < 2:
@@ -454,6 +464,8 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
             self.ref_dist = (dist_min + dist_max) / 2.0
         else:
             self.ref_dist = ref_dist
+        if self.ref_dist <= 0:
+            raise ValueError("ref_dist must be > 0")
 
         distance_grid = jnp.linspace(dist_min, dist_max, n_dist_points)
         delta_d = (dist_max - dist_min) / (n_dist_points - 1)
