@@ -82,7 +82,7 @@ class Jim(object):
             )
 
         if rng_key is None:
-            seed = int(time.time())
+            seed = int(time.time_ns() % (2**32))
             rng_key = jax.random.key(seed)
             logger.info(
                 "No rng_key provided for sampler initialization. Using time-based key with seed=%d (key=%s).",
