@@ -5,8 +5,12 @@ from pathlib import Path
 from jimgw.core.single_event.likelihood import (
     ZeroLikelihood,
     BaseTransientLikelihoodFD,
+    TimeMarginalizedLikelihoodFD,
+    PhaseMarginalizedLikelihoodFD,
     DistanceMarginalizedLikelihoodFD,
+    PhaseTimeMarginalizedLikelihoodFD,
     HeterodynedTransientLikelihoodFD,
+    HeterodynedPhaseMarginalizedLikelihoodFD,
 )
 from jimgw.core.single_event.detector import get_H1, get_L1
 from jimgw.core.single_event.waveform import RippleIMRPhenomD
@@ -61,6 +65,10 @@ class TestZeroLikelihood:
 
 
 class TestBaseTransientLikelihoodFD:
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
     def test_initialization(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
         likelihood = BaseTransientLikelihoodFD(
@@ -71,6 +79,10 @@ class TestBaseTransientLikelihoodFD:
         assert likelihood.frequencies[-1] == fmax
         assert likelihood.trigger_time == 1126259462.4
         assert hasattr(likelihood, "gmst")
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
 
     def test_uninitialized_data_raises_error(self):
         """Test that initializing likelihood with detectors that have no data raises an error."""
@@ -168,6 +180,10 @@ class TestBaseTransientLikelihoodFD:
                 trigger_time=gps,
             )
 
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
     def test_evaluation(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
         likelihood = BaseTransientLikelihoodFD(
@@ -206,6 +222,10 @@ class TestBaseTransientLikelihoodFD:
 
 
 class TestHeterodynedTransientLikelihoodFD:
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
     def test_initialization_and_evaluation(self, detectors_and_waveform):
         ifos, waveform, fmin, fmax, gps = detectors_and_waveform
         # First create base likelihood for comparison
@@ -237,6 +257,526 @@ class TestHeterodynedTransientLikelihoodFD:
             base_result,
         ), (
             f"Heterodyned likelihood ({result}) should match base likelihood ({base_result}) at reference parameters"
+        )
+
+    def test_initialization_stores_attributes(self, detectors_and_waveform):
+        """Coefficient arrays and grid arrays are populated after init."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_likelihood = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_likelihood.gmst)
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        assert hasattr(likelihood, "freq_grid_low")
+        assert hasattr(likelihood, "freq_grid_center")
+        for det in ifos:
+            assert det.name in likelihood.A0_array
+            assert det.name in likelihood.A1_array
+            assert det.name in likelihood.B0_array
+            assert det.name in likelihood.B1_array
+            assert det.name in likelihood.waveform_low_ref
+            assert det.name in likelihood.waveform_center_ref
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
+
+    def test_no_reference_params_and_no_prior_raises(self, detectors_and_waveform):
+        """Omitting both reference_parameters and prior must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError):
+            HeterodynedTransientLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+            )
+
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
+    def test_evaluate_jit_matches(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_likelihood = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_likelihood.gmst)
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        result_jit = jax.jit(likelihood.evaluate)(params, {})
+        assert jnp.allclose(result, result_jit), "JIT and eager results should match"
+
+    def test_evaluate_different_fmin(self, detectors_and_waveform):
+        """Heterodyned likelihood must accept per-detector f_min and produce a finite result."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_likelihood = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_likelihood.gmst)
+        likelihood = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min={"H1": fmin, "L1": fmin + 1.0},
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), "Heterodyned likelihood should be finite with different f_min"
+
+
+class TestTimeMarginalizedLikelihoodFD:
+    """Tests for TimeMarginalizedLikelihoodFD."""
+
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization(self, detectors_and_waveform):
+        """tc_range, tc_array, pad_low and pad_high are stored after init."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        assert isinstance(likelihood, TimeMarginalizedLikelihoodFD)
+        assert hasattr(likelihood, "tc_range")
+        assert hasattr(likelihood, "tc_array")
+        assert hasattr(likelihood, "pad_low")
+        assert hasattr(likelihood, "pad_high")
+        assert likelihood.tc_range == (-0.12, 0.12)
+
+    def test_custom_tc_range(self, detectors_and_waveform):
+        """A custom tc_range is stored and reflected in the likelihood."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        custom_range = (-0.05, 0.05)
+        likelihood = TimeMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            tc_range=custom_range,
+        )
+        assert likelihood.tc_range == custom_range
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
+
+    def test_fixed_t_c_raises(self, detectors_and_waveform):
+        """Passing t_c in fixed_parameters must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError, match="Cannot have t_c fixed"):
+            TimeMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                fixed_parameters={"t_c": 0.0},
+            )
+
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization_and_evaluation(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        assert isinstance(likelihood, TimeMarginalizedLikelihoodFD)
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), "Time-marginalized likelihood should be finite"
+
+    def test_geq_base_likelihood(self, detectors_and_waveform):
+        """Marginalizing over t_c must give a result >= the base likelihood at t_c=0."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_ll = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        marg_ll = TimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(marg_ll.gmst)
+        assert marg_ll.evaluate(params, {}) >= base_ll.evaluate(params, {}), (
+            "Time-marginalized log-likelihood must be >= base log-likelihood"
+        )
+
+    def test_evaluate_jit_matches(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        result_jit = jax.jit(likelihood.evaluate)(params, {})
+        assert jnp.allclose(result, result_jit), "JIT and eager results should match"
+
+    def test_evaluate_different_fmin(self, detectors_and_waveform):
+        """Per-detector f_min must be accepted and produce a finite result."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = TimeMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min={"H1": fmin, "L1": fmin + 1.0},
+            f_max=fmax,
+            trigger_time=gps,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), (
+            "Time-marginalized likelihood should be finite with different f_min"
+        )
+
+
+class TestPhaseMarginalizedLikelihoodFD:
+    """Tests for PhaseMarginalizedLikelihoodFD."""
+
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        assert isinstance(likelihood, PhaseMarginalizedLikelihoodFD)
+        assert likelihood.trigger_time == gps
+        assert hasattr(likelihood, "gmst")
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
+
+    def test_fixed_phase_c_raises(self, detectors_and_waveform):
+        """Passing phase_c in fixed_parameters must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError, match="Cannot have phase_c fixed"):
+            PhaseMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                fixed_parameters={"phase_c": 0.0},
+            )
+
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization_and_evaluation(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), "Phase-marginalized likelihood should be finite"
+
+    def test_geq_base_likelihood(self, detectors_and_waveform):
+        """Marginalizing over phase must give a result >= the base likelihood at phase_c=0."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_ll = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        marg_ll = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(marg_ll.gmst)
+        assert marg_ll.evaluate(params, {}) >= base_ll.evaluate(params, {}), (
+            "Phase-marginalized log-likelihood must be >= base log-likelihood"
+        )
+
+    def test_evaluate_jit_matches(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        result_jit = jax.jit(likelihood.evaluate)(params, {})
+        assert jnp.allclose(result, result_jit), "JIT and eager results should match"
+
+    def test_evaluate_different_fmin(self, detectors_and_waveform):
+        """Per-detector f_min must be accepted and produce a finite result."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min={"H1": fmin, "L1": fmin + 1.0},
+            f_max=fmax,
+            trigger_time=gps,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), (
+            "Phase-marginalized likelihood should be finite with different f_min"
+        )
+
+
+class TestPhaseTimeMarginalizedLikelihoodFD:
+    """Tests for PhaseTimeMarginalizedLikelihoodFD."""
+
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseTimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        assert isinstance(likelihood, PhaseTimeMarginalizedLikelihoodFD)
+        assert hasattr(likelihood, "tc_range")
+        assert hasattr(likelihood, "tc_array")
+        assert likelihood.tc_range == (-0.12, 0.12)
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
+
+    def test_fixed_phase_c_raises(self, detectors_and_waveform):
+        """Passing phase_c in fixed_parameters must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError, match="Cannot have phase_c fixed"):
+            PhaseTimeMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                fixed_parameters={"phase_c": 0.0},
+            )
+
+    def test_fixed_t_c_raises(self, detectors_and_waveform):
+        """Passing t_c in fixed_parameters must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError, match="Cannot have t_c fixed"):
+            PhaseTimeMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                fixed_parameters={"t_c": 0.0},
+            )
+
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization_and_evaluation(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseTimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), "Phase-time-marginalized likelihood should be finite"
+
+    def test_geq_phase_marginalized(self, detectors_and_waveform):
+        """Joint phase+time marginalization must give a result >= phase-only marginalization."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        phase_ll = PhaseMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        phasetime_ll = PhaseTimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(phasetime_ll.gmst)
+        assert phasetime_ll.evaluate(params, {}) >= phase_ll.evaluate(params, {}), (
+            "Phase+time marginalized log-likelihood must be >= phase-only marginalized"
+        )
+
+    def test_evaluate_jit_matches(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseTimeMarginalizedLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        result_jit = jax.jit(likelihood.evaluate)(params, {})
+        assert jnp.allclose(result, result_jit), "JIT and eager results should match"
+
+    def test_evaluate_different_fmin(self, detectors_and_waveform):
+        """Per-detector f_min must be accepted and produce a finite result."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = PhaseTimeMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min={"H1": fmin, "L1": fmin + 1.0},
+            f_max=fmax,
+            trigger_time=gps,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), (
+            "Phase-time-marginalized likelihood should be finite with different f_min"
+        )
+
+
+class TestHeterodynedPhaseMarginalizedLikelihoodFD:
+    """Tests for HeterodynedPhaseMarginalizedLikelihoodFD."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def make_likelihood(ifos, waveform, fmin, fmax, gps, **kwargs):
+        """Build a HeterodynedPhaseMarginalizedLikelihoodFD with shared reference params."""
+        base = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base.gmst)
+        return HeterodynedPhaseMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+            **kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # Happy-path initialisation tests
+    # ------------------------------------------------------------------
+
+    def test_initialization_and_evaluation(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_likelihood = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_likelihood.gmst)
+        likelihood = HeterodynedPhaseMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        assert isinstance(likelihood, HeterodynedPhaseMarginalizedLikelihoodFD)
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), "Heterodyned phase-marginalized likelihood should be finite"
+
+    # ------------------------------------------------------------------
+    # Validation tests
+    # ------------------------------------------------------------------
+
+    def test_fixed_phase_c_raises(self, detectors_and_waveform):
+        """Passing phase_c in fixed_parameters must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base.gmst)
+        with pytest.raises(ValueError, match="Cannot have phase_c fixed"):
+            HeterodynedPhaseMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+                reference_parameters=ref_params,
+                fixed_parameters={"phase_c": 0.0},
+            )
+
+    def test_no_reference_params_and_no_prior_raises(self, detectors_and_waveform):
+        """Omitting both reference_parameters and prior must raise ValueError."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        with pytest.raises(ValueError):
+            HeterodynedPhaseMarginalizedLikelihoodFD(
+                detectors=ifos,
+                waveform=waveform,
+                f_min=fmin,
+                f_max=fmax,
+                trigger_time=gps,
+            )
+
+    # ------------------------------------------------------------------
+    # Numerical evaluation tests
+    # ------------------------------------------------------------------
+
+    def test_geq_heterodyned_base(self, detectors_and_waveform):
+        """Phase-marginalized heterodyned LL must be >= its non-marginalized counterpart."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_ll = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_ll.gmst)
+        het_ll = HeterodynedTransientLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        het_phase_ll = HeterodynedPhaseMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min=fmin,
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        params = example_params(het_phase_ll.gmst)
+        assert het_phase_ll.evaluate(params, {}) >= het_ll.evaluate(params, {}), (
+            "HeterodynedPhaseMarg log-likelihood must be >= Heterodyned log-likelihood"
+        )
+
+    def test_evaluate_jit_matches(self, detectors_and_waveform):
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        likelihood = self.make_likelihood(ifos, waveform, fmin, fmax, gps)
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        result_jit = jax.jit(likelihood.evaluate)(params, {})
+        assert jnp.allclose(result, result_jit), "JIT and eager results should match"
+
+    def test_evaluate_different_fmin(self, detectors_and_waveform):
+        """Per-detector f_min must be accepted and produce a finite result."""
+        ifos, waveform, fmin, fmax, gps = detectors_and_waveform
+        base_likelihood = BaseTransientLikelihoodFD(
+            detectors=ifos, waveform=waveform, f_min=fmin, f_max=fmax, trigger_time=gps
+        )
+        ref_params = example_params(base_likelihood.gmst)
+        likelihood = HeterodynedPhaseMarginalizedLikelihoodFD(
+            detectors=ifos,
+            waveform=waveform,
+            f_min={"H1": fmin, "L1": fmin + 1.0},
+            f_max=fmax,
+            trigger_time=gps,
+            reference_parameters=ref_params,
+        )
+        params = example_params(likelihood.gmst)
+        result = likelihood.evaluate(params, {})
+        assert jnp.isfinite(result), (
+            "Heterodyned phase-marginalized likelihood should be finite with different f_min"
         )
 
 
