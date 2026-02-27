@@ -118,6 +118,10 @@ class Jim(object):
             max_temperature=max_temperature,
             n_tempered_steps=n_tempered_steps,
             logprior=self.evaluate_prior,
+            early_stopping=True,  # type: ignore # Type ignored should be removed once the flowMC release is published
+            early_stopping_tolerance=0.1,  # type: ignore # Type ignored should be removed once the flowMC release is published
+            early_stopping_patience=3,  # type: ignore # Type ignored should be removed once the flowMC release is published
+            early_stopping_min_acceptance=0.1,  # type: ignore # Type ignored should be removed once the flowMC release is published
             verbose=verbose,
         )
 
