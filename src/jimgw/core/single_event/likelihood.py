@@ -159,7 +159,11 @@ class BaseTransientLikelihoodFD(SingleEventLikelihood):
         self.frequencies = jnp.unique(jnp.concatenate(_frequencies))
 
         # Check that all detectors have the same frequency array, unless using specialized likelihoods
-        if type(self) not in [BaseTransientLikelihoodFD, PhaseMarginalizedLikelihoodFD]:
+        if type(self) not in [
+            BaseTransientLikelihoodFD,
+            PhaseMarginalizedLikelihoodFD,
+            DistanceMarginalizedLikelihoodFD,
+        ]:
             assert all(
                 jnp.array_equal(_frequencies[0], freq) for freq in _frequencies
             ), (
@@ -383,6 +387,134 @@ class PhaseMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
 
         log_likelihood += log_i0(jnp.absolute(complex_d_inner_h))
         return log_likelihood
+
+
+class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
+    """Frequency-domain likelihood with analytic marginalization over luminosity distance.
+
+    Implements distance marginalization following Thrane & Talbot (2019), Eq. 69.
+    The likelihood is marginalized over luminosity distance using numerical quadrature
+    (logsumexp over a grid of distance values).
+
+    The key identity is that the matched-filter SNR scales as d_ref/d_L and the
+    optimal SNR scales as (d_ref/d_L)^2, allowing efficient marginalization.
+
+    Attributes:
+        ref_dist (Float): Reference distance at which the waveform is evaluated.
+        scaling (Float[Array, " n_dist"]): Array of d_ref / d_grid values.
+        log_weights (Float[Array, " n_dist"]): Normalized log prior weights for quadrature.
+
+    Args:
+        detectors: List of detector objects containing data and metadata.
+        waveform: Waveform model to evaluate.
+        f_min: Minimum frequency for likelihood evaluation.
+        f_max: Maximum frequency for likelihood evaluation.
+        trigger_time: GPS time of the event trigger.
+        dist_prior: A 1D prior over luminosity distance. Must have ``'d_L'`` in
+            ``parameter_names`` and ``xmin`` / ``xmax`` attributes defining the
+            integration bounds (e.g. ``PowerLawPrior`` or ``UniformPrior``).
+        n_dist_points: Number of grid points for distance quadrature.
+        ref_dist: Reference distance (Mpc). Defaults to midpoint of [dist_min, dist_max].
+    """
+
+    ref_dist: Float
+    scaling: Float[Array, " n_dist"]
+    log_weights: Float[Array, " n_dist"]
+
+    def __init__(
+        self,
+        detectors: Sequence[Detector],
+        waveform: Waveform,
+        fixed_parameters: Optional[dict[str, Float]] = None,
+        f_min: float | dict[str, float] = 0.0,
+        f_max: float | dict[str, float] = float("inf"),
+        trigger_time: Float = 0,
+        dist_prior: Optional[Prior] = None,
+        n_dist_points: int = 10000,
+        ref_dist: Optional[float] = None,
+    ) -> None:
+        super().__init__(
+            detectors, waveform, fixed_parameters, f_min, f_max, trigger_time
+        )
+
+        if "d_L" in self.fixed_parameters:
+            raise ValueError("Cannot have d_L fixed while marginalising over d_L")
+
+        # --- Validate the d_L prior ---
+        if dist_prior is None:
+            raise ValueError(
+                "dist_prior must be provided. "
+                "Example: PowerLawPrior(xmin=100, xmax=5000, alpha=2.0, parameter_names=['d_L'])"
+            )
+
+        if list(dist_prior.parameter_names) != ["d_L"]:
+            raise ValueError(
+                f"dist_prior must be a 1D prior with parameter_names=['d_L'], "
+                f"got parameter_names={list(dist_prior.parameter_names)}."
+            )
+
+        if not hasattr(dist_prior, "xmin") or not hasattr(dist_prior, "xmax"):
+            raise ValueError(
+                "The d_L sub-prior must have xmin and xmax attributes. "
+                "Use a bounded prior such as PowerLawPrior or UniformPrior."
+            )
+
+        dist_min = float(getattr(dist_prior, "xmin"))
+        dist_max = float(getattr(dist_prior, "xmax"))
+
+        if dist_min <= 0:
+            raise ValueError(
+                "The d_L prior's xmin must be > 0 (distance must be positive)"
+            )
+        if dist_max <= dist_min:
+            raise ValueError("The d_L prior's xmax must be greater than xmin")
+
+        if n_dist_points < 2:
+            raise ValueError("n_dist_points must be at least 2")
+
+        if ref_dist is None:
+            self.ref_dist = (dist_min + dist_max) / 2.0
+        else:
+            if ref_dist <= 0:
+                raise ValueError("ref_dist must be > 0")
+            self.ref_dist = ref_dist
+
+        distance_grid = jnp.linspace(dist_min, dist_max, n_dist_points)
+        delta_d = (dist_max - dist_min) / (n_dist_points - 1)
+        self.scaling = self.ref_dist / distance_grid
+
+        log_prob_fn = jax.vmap(lambda d: dist_prior.log_prob({"d_L": d}))
+        log_w = log_prob_fn(distance_grid) + jnp.log(delta_d)
+        self.log_weights = log_w - logsumexp(log_w)
+
+    def evaluate(self, params: dict[str, Float], data: dict) -> Float:
+        params.update(self.fixed_parameters)
+        params["d_L"] = self.ref_dist
+        params["trigger_time"] = self.trigger_time
+        params["gmst"] = self.gmst
+        return self._likelihood(params, data)
+
+    def _likelihood(self, params: dict[str, Float], data: dict) -> Float:
+        waveform_sky = self.waveform(self.frequencies, params)
+
+        kappa2_ref = 0.0
+        rho2_ref = 0.0
+        for i, ifo in enumerate(self.detectors):
+            psd = ifo.sliced_psd
+
+            waveform_sky_ifo = {
+                key: waveform_sky[key][self.frequency_masks[i]] for key in waveform_sky
+            }
+            h_dec = ifo.fd_response(ifo.sliced_frequencies, waveform_sky_ifo, params)
+            kappa2_ref += inner_product(h_dec, ifo.sliced_fd_data, psd, self.df)
+            rho2_ref += inner_product(h_dec, h_dec, psd, self.df)
+
+        log_integrand = (
+            kappa2_ref * self.scaling
+            - 0.5 * rho2_ref * self.scaling**2
+            + self.log_weights
+        )
+        return logsumexp(log_integrand)
 
 
 class PhaseTimeMarginalizedLikelihoodFD(TimeMarginalizedLikelihoodFD):
@@ -857,6 +989,7 @@ likelihood_presets = {
     "BaseTransientLikelihoodFD": BaseTransientLikelihoodFD,
     "TimeMarginalizedLikelihoodFD": TimeMarginalizedLikelihoodFD,
     "PhaseMarginalizedLikelihoodFD": PhaseMarginalizedLikelihoodFD,
+    "DistanceMarginalizedLikelihoodFD": DistanceMarginalizedLikelihoodFD,
     "PhaseTimeMarginalizedLikelihoodFD": PhaseTimeMarginalizedLikelihoodFD,
     "HeterodynedTransientLikelihoodFD": HeterodynedTransientLikelihoodFD,
     "PhaseMarginalizedHeterodynedLikelihoodFD": HeterodynedPhaseMarginalizedLikelihoodFD,
