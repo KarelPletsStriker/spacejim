@@ -86,8 +86,8 @@ class Detector(ABC):
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
         Args:
-            frequency (Float[Array, " n_sample"]): Array of frequency samples.
-            h_sky (dict[str, Float[Array, " n_sample"]]): Dictionary mapping polarization names
+            frequency (Float[Array, "n_sample"]): Array of frequency samples.
+            h_sky (dict[str, Float[Array, "n_sample"]]): Dictionary mapping polarization names
                 to frequency-domain waveforms. The keys are polarization names (e.g., 'plus', 'cross')
                 and values are complex strain arrays.
             params (dict): Dictionary of source parameters including:
@@ -100,7 +100,7 @@ class Detector(ABC):
             **kwargs: Additional keyword arguments.
 
         Returns:
-            Complex[Array, " n_sample"]: Complex strain measured by the detector in frequency domain.
+            Complex[Array, "n_sample"]: Complex strain measured by the detector in frequency domain.
         """
         pass
 
@@ -168,8 +168,8 @@ class Detector(ABC):
         """Get frequency-domain data slice based on frequency bounds.
 
         Returns:
-            Float[Array, " n_sample"]: Sliced frequency-domain data.
-            Float[Array, " n_sample"]: Frequency array.
+            Float[Array, "n_sample"]: Sliced frequency-domain data.
+            Float[Array, "n_sample"]: Frequency array.
         """
         return self._sliced_frequencies
 
@@ -178,7 +178,7 @@ class Detector(ABC):
         """Get frequency-domain data slice based on frequency bounds.
 
         Returns:
-            Complex[Array, " n_freq"]: Sliced frequency-domain data.
+            Complex[Array, "n_freq"]: Sliced frequency-domain data.
         """
         return self._sliced_fd_data
 
@@ -187,7 +187,7 @@ class Detector(ABC):
         """Get PSD slice based on frequency bounds.
 
         Returns:
-            Float[Array, " n_freq"]: Sliced power spectral density.
+            Float[Array, "n_freq"]: Sliced power spectral density.
         """
         return self._sliced_psd
 
@@ -284,7 +284,7 @@ class GroundBased2G(Detector):
     @staticmethod
     def _get_arm(
         lat: Float, lon: Float, tilt: Float, azimuth: Float
-    ) -> Float[Array, " 3"]:
+    ) -> Float[Array, "3"]:
         """Construct detector-arm vectors in geocentric Cartesian coordinates.
 
         Args:
@@ -294,7 +294,7 @@ class GroundBased2G(Detector):
             azimuth (Float): Arm azimuth in radians.
 
         Returns:
-            Float[Array, " 3"]: Detector arm vector in geocentric Cartesian coordinates.
+            Float[Array, "3"]: Detector arm vector in geocentric Cartesian coordinates.
         """
         e_lon = jnp.array([-jnp.sin(lon), jnp.cos(lon), 0])
         e_lat = jnp.array(
@@ -311,11 +311,11 @@ class GroundBased2G(Detector):
         )
 
     @property
-    def arms(self) -> tuple[Float[Array, " 3"], Float[Array, " 3"]]:
+    def arms(self) -> tuple[Float[Array, "3"], Float[Array, "3"]]:
         """Get the detector arm vectors.
 
         Returns:
-            tuple[Float[Array, " 3"], Float[Array, " 3"]]: A tuple containing:
+            tuple[Float[Array, "3"], Float[Array, "3"]]: A tuple containing:
                 - x: X-arm vector in geocentric Cartesian coordinates
                 - y: Y-arm vector in geocentric Cartesian coordinates
         """
@@ -328,7 +328,7 @@ class GroundBased2G(Detector):
         return x, y
 
     @property
-    def tensor(self) -> Float[Array, " 3 3"]:
+    def tensor(self) -> Float[Array, "3 3"]:
         """Get the detector tensor defining the strain measurement.
 
         For a 2-arm differential-length detector, this is given by:
@@ -340,7 +340,7 @@ class GroundBased2G(Detector):
         for unit vectors :math:`x` and :math:`y` along the x and y arms.
 
         Returns:
-            Float[Array, " 3 3"]: The 3x3 detector tensor in geocentric coordinates.
+            Float[Array, "3 3"]: The 3x3 detector tensor in geocentric coordinates.
         """
         # TODO: this could easily be generalized for other detector geometries
         arm1, arm2 = self.arms
@@ -349,14 +349,14 @@ class GroundBased2G(Detector):
         )
 
     @property
-    def vertex(self) -> Float[Array, " 3"]:
+    def vertex(self) -> Float[Array, "3"]:
         """Detector vertex coordinates in the reference celestial frame.
 
         Based on arXiv:gr-qc/0008066 Eqs. (B11-B13) except for a typo in the
         definition of the local radius; see Section 2.1 of LIGO-T980044-10.
 
         Returns:
-            Float[Array, " 3"]: Detector vertex coordinates in geocentric Cartesian coordinates.
+            Float[Array, "3"]: Detector vertex coordinates in geocentric Cartesian coordinates.
         """
         # get detector and Earth parameters
         lat = self.latitude
@@ -382,8 +382,8 @@ class GroundBased2G(Detector):
         """Modulate the waveform in the sky frame by the detector response in the frequency domain.
 
         Args:
-            frequency (Float[Array, " n_sample"]): Array of frequency samples.
-            h_sky (dict[str, Float[Array, " n_sample"]]): Dictionary mapping polarization names
+            frequency (Float[Array, "n_sample"]): Array of frequency samples.
+            h_sky (dict[str, Float[Array, "n_sample"]]): Dictionary mapping polarization names
                 to frequency-domain waveforms. Keys are polarization names (e.g., 'plus', 'cross')
                 and values are complex strain arrays.
             params (dict[str, Float]): Dictionary of source parameters containing:
@@ -501,7 +501,7 @@ class GroundBased2G(Detector):
             psd_file (str, optional): Path to file containing PSD data. If empty, uses GWTC-2 PSD.
 
         Returns:
-            Float[Array, " n_sample"]: Array of PSD values of the detector.
+            Float[Array, "n_sample"]: Array of PSD values of the detector.
         """
         if psd_file != "":
             f, psd_vals = loadtxt(psd_file, unpack=True)
@@ -663,9 +663,9 @@ class GroundBased2G(Detector):
     ) -> Complex[Array, " n_freq"]:
         """Get the whitened frequency-domain strain.
         Args:
-            frequency_series (Complex[Array, " n_freq"]): Array of frequency domain data/signal.
+            frequency_series (Complex[Array, "n_freq"]): Array of frequency domain data/signal.
         Returns:
-            Complex[Array, " n_freq"]: Whitened frequency-domain strain.
+            Complex[Array, "n_freq"]: Whitened frequency-domain strain.
         """
         scaled_asd = jnp.sqrt(self.psd.values * self.duration / 4)
         return (frequency_series / scaled_asd) * self.frequency_mask
@@ -675,10 +675,10 @@ class GroundBased2G(Detector):
     ) -> Float[Array, " n_time"]:
         """Get the whitened frequency-domain strain.
         Args:
-            whitened_frequency_series (Complex[Array, " n_time // 2 + 1"]):
+            whitened_frequency_series (Complex[Array, "n_time // 2 + 1"]):
                 Array of whitened frequency domain data/signal.
         Returns:
-            Float[Array, " n_time"]: Whitened time-domain strain/signal.
+            Float[Array, "n_time"]: Whitened time-domain strain/signal.
         """
         freq_mask_ratio = len(self.frequency_mask) / jnp.sqrt(
             jnp.sum(self.frequency_mask)
@@ -690,10 +690,10 @@ class GroundBased2G(Detector):
         """Get the whitened frequency-domain data.
 
         Args:
-            frequency (Float[Array, " n_sample"]): Array of frequency samples.
+            frequency (Float[Array, "n_sample"]): Array of frequency samples.
 
         Returns:
-            Float[Array, " n_sample"]: Whitened frequency-domain data.
+            Float[Array, "n_sample"]: Whitened frequency-domain data.
         """
 
         return self.get_whitened_frequency_domain_strain(self.data.fd)
@@ -703,10 +703,10 @@ class GroundBased2G(Detector):
         """Get the whitened time-domain data.
 
         Args:
-            time (Float[Array, " n_sample"]): Array of time samples.
+            time (Float[Array, "n_sample"]): Array of time samples.
 
         Returns:
-            Float[Array, " n_sample"]: Whitened time-domain data.
+            Float[Array, "n_sample"]: Whitened time-domain data.
         """
         return self.whitened_frequency_to_time_domain_strain(
             self.whitened_frequency_domain_data

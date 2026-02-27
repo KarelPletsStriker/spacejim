@@ -171,7 +171,7 @@ class Jim(object):
             named_params = transform.forward(named_params)
         return self.likelihood.evaluate(named_params, data) + prior
 
-    def sample_initial_condition(self) -> Float[Array, " n_chains n_dims"]:
+    def sample_initial_condition(self) -> Float[Array, "n_chains n_dims"]:
         rng_key, subkey = jax.random.split(self.sampler.rng_key)
 
         initial_position = self.prior.sample(subkey, self.sampler.n_chains)
@@ -193,7 +193,7 @@ class Jim(object):
 
     def sample(
         self,
-        initial_position: Optional[Float[Array, " n_chains n_dims"]] = None,
+        initial_position: Optional[Float[Array, "n_chains n_dims"]] = None,
     ):
         if initial_position is None:
             logger.info("No initial_position provided. Sampling from prior.")

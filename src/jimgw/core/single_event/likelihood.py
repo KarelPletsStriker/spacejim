@@ -234,7 +234,7 @@ class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
     """
 
     tc_range: tuple[Float, Float]
-    tc_array: Float[Array, " duration*f_sample/2"]
+    tc_array: Float[Array, " duration * f_sample / 2"]
     pad_low: Float[Array, " n_pad_low"]
     pad_high: Float[Array, " n_pad_high"]
 
@@ -400,8 +400,8 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
 
     Attributes:
         ref_dist (Float): Reference distance at which the waveform is evaluated.
-        scaling (Float[Array, " n_dist"]): Array of d_ref / d_grid values.
-        log_weights (Float[Array, " n_dist"]): Normalized log prior weights for quadrature.
+        scaling (Float[Array, "n_dist"]): Array of d_ref / d_grid values.
+        log_weights (Float[Array, "n_dist"]): Normalized log prior weights for quadrature.
 
     Args:
         detectors: List of detector objects containing data and metadata.
@@ -820,7 +820,7 @@ class HeterodynedTransientLikelihoodFD(BaseTransientLikelihoodFD):
 
     def make_binning_scheme(
         self, freqs: Float[Array, " n_freq"], n_bins: int, chi: float = 1
-    ) -> tuple[Float[Array, " n_bins+1"], Float[Array, " n_bins"]]:
+    ) -> tuple[Float[Array, " n_bins + 1"], Float[Array, " n_bins"]]:
         """
         Make a binning scheme based on the maximum phase difference between the
         frequencies in the array.
