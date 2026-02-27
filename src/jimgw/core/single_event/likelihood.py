@@ -218,10 +218,11 @@ class BaseTransientLikelihoodFD(SingleEventLikelihood):
 class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
     """Frequency-domain likelihood class with analytic marginalization over coalescence time.
 
-    This class implements a likelihood function for gravitational wave transient events,
-    marginalized over the coalescence time parameter (`t_c`). The marginalization is performed
-    using a fast Fourier transform (FFT) over the frequency domain inner product between the
-    model and the data. The likelihood is computed for a set of detectors and a waveform model.
+    Implements a likelihood function for gravitational wave transient events,
+    marginalized over the coalescence time parameter (``t_c``). The marginalization
+    is performed using an FFT of the per-frequency matched-filter integrand
+    ``<d|h>(f) = 4 h(f) d*(f) / S(f) df``, giving a timeseries whose real part
+    is logsumexp'd over the prior range.
 
     Attributes:
         tc_range (tuple[Float, Float]): The range of coalescence times to marginalize over.
@@ -311,7 +312,8 @@ class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         """
 
         log_likelihood = 0.0
-        complex_h_inner_d = jnp.zeros_like(self.detectors[0].sliced_frequencies)
+        # Per-frequency integrand 4 h(f) d*(f) / S(f) df  →  <d|h> (d is conjugated)
+        complex_d_inner_h = jnp.zeros_like(self.detectors[0].sliced_frequencies)
         df = (
             self.detectors[0].sliced_frequencies[1]
             - self.detectors[0].sliced_frequencies[0]
@@ -324,33 +326,40 @@ class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
                 ifo.sliced_psd,
             )
             h_dec = ifo.fd_response(freqs, waveform_sky, params)
-            # using <h|d> instead of <d|h>
-            complex_h_inner_d += 4 * h_dec * jnp.conj(ifo_data) / psd * df
+            complex_d_inner_h += 4 * h_dec * jnp.conj(ifo_data) / psd * df
             optimal_SNR = inner_product(h_dec, h_dec, psd, df)
             log_likelihood += -optimal_SNR / 2
 
-        # Padding the complex_h_inner_d to cover the full frequency range
-        complex_h_inner_d_positive_f = jnp.concatenate(
-            (self.pad_low, complex_h_inner_d, self.pad_high)
+        # Pad to cover the full frequency range before FFT
+        complex_d_inner_h_positive_f = jnp.concatenate(
+            (self.pad_low, complex_d_inner_h, self.pad_high)
         )
 
-        # FFT to obtain <h|d> exp(-i2πf t_c) as a function of t_c
-        fft_h_inner_d = jnp.fft.fft(complex_h_inner_d_positive_f, norm="backward")
+        # FFT to obtain the matched-filter SNR timeseries as a function of t_c
+        fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
 
         # Restrict FFT output to the allowed tc_range, set others to -inf
-        fft_h_inner_d = jnp.where(
+        fft_d_inner_h = jnp.where(
             (self.tc_array > self.tc_range[0]) & (self.tc_array < self.tc_range[1]),
-            fft_h_inner_d.real,
-            jnp.zeros_like(fft_h_inner_d.real) - jnp.inf,
+            fft_d_inner_h.real,
+            jnp.zeros_like(fft_d_inner_h.real) - jnp.inf,
         )
 
         # Marginalize over t_c using logsumexp
-        log_likelihood += logsumexp(fft_h_inner_d) - jnp.log(len(self.tc_array))
+        log_likelihood += logsumexp(fft_d_inner_h) - jnp.log(len(self.tc_array))
         return log_likelihood
 
 
 class PhaseMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
-    """This has not been tested by a human yet."""
+    """Frequency-domain likelihood with analytic marginalization over coalescence phase.
+
+    The phase is marginalized analytically using the Bessel function identity:
+    the marginal likelihood is proportional to ``I_0(|<d|h>|)`` where ``<d|h>``
+    is the complex matched-filter inner product summed over detectors.
+    ``evaluate()`` internally sets ``phase_c = 0`` before projecting the waveform;
+    callers should therefore pass spins (and other phase-dependent parameters)
+    computed at ``phase = 0`` to remain self-consistent.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -518,7 +527,14 @@ class DistanceMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
 
 
 class PhaseTimeMarginalizedLikelihoodFD(TimeMarginalizedLikelihoodFD):
-    """This has not been tested by a human yet."""
+    """Frequency-domain likelihood with joint analytic marginalization over coalescence time and phase.
+
+    Combines the FFT-based time marginalization of ``TimeMarginalizedLikelihoodFD``
+    with the Bessel function phase marginalization: the SNR timeseries
+    ``|<d|h>(t_c)|`` is computed via FFT and then marginalized with ``log_i0``.
+    ``evaluate()`` internally sets both ``t_c = 0`` and ``phase_c = 0``; callers
+    should pass spins computed at ``phase = 0`` to remain self-consistent.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -538,7 +554,8 @@ class PhaseTimeMarginalizedLikelihoodFD(TimeMarginalizedLikelihoodFD):
     def _likelihood(self, params: dict[str, Float], data: dict) -> Float:
         # Refactored: use self.detectors, self.frequencies, self.tc_array, self.pad_low, self.pad_high, self.tc_range
         log_likelihood = 0.0
-        complex_h_inner_d = 0.0 + 0.0j
+        # Per-frequency integrand 4 h(f) d*(f) / S(f) df  →  <d|h> (d is conjugated)
+        complex_d_inner_h = jnp.zeros_like(self.detectors[0].sliced_frequencies)
 
         df = (
             self.detectors[0].sliced_frequencies[1]
@@ -552,23 +569,23 @@ class PhaseTimeMarginalizedLikelihoodFD(TimeMarginalizedLikelihoodFD):
                 ifo.sliced_psd,
             )
             h_dec = ifo.fd_response(freqs, waveform_sky, params)
-            complex_h_inner_d += complex_inner_product(h_dec, ifo_data, psd, df)
+            complex_d_inner_h += 4 * h_dec * jnp.conj(ifo_data) / psd * df
             optimal_SNR = inner_product(h_dec, h_dec, psd, df)
             log_likelihood += -optimal_SNR / 2
 
-        # Pad the complex_h_inner_d to cover the full frequency range
-        complex_h_inner_d_positive_f = jnp.concatenate(
-            (self.pad_low, complex_h_inner_d, self.pad_high)
+        # Pad to cover the full frequency range before FFT
+        complex_d_inner_h_positive_f = jnp.concatenate(
+            (self.pad_low, complex_d_inner_h, self.pad_high)
         )
 
-        # FFT to obtain <h|d> exp(-i2πf t_c) as a function of t_c
-        fft_h_inner_d = jnp.fft.fft(complex_h_inner_d_positive_f, norm="backward")
+        # FFT to obtain the matched-filter SNR timeseries as a function of t_c
+        fft_d_inner_h = jnp.fft.fft(complex_d_inner_h_positive_f, norm="backward")
 
         # Restrict FFT output to the allowed tc_range, set others to -inf
         log_i0_abs_fft = jnp.where(
             (self.tc_array > self.tc_range[0]) & (self.tc_array < self.tc_range[1]),
-            log_i0(jnp.absolute(fft_h_inner_d)),
-            jnp.zeros_like(fft_h_inner_d.real) - jnp.inf,
+            log_i0(jnp.absolute(fft_d_inner_h)),
+            jnp.zeros_like(fft_d_inner_h.real) - jnp.inf,
         )
 
         # Marginalize over t_c using logsumexp
