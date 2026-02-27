@@ -158,22 +158,12 @@ class BaseTransientLikelihoodFD(SingleEventLikelihood):
         self.df = _frequencies[0][1] - _frequencies[0][0]
         self.frequencies = jnp.unique(jnp.concatenate(_frequencies))
 
-        # Check that all detectors have the same frequency array, unless using specialized likelihoods
-        if type(self) not in [
-            BaseTransientLikelihoodFD,
-            PhaseMarginalizedLikelihoodFD,
-            DistanceMarginalizedLikelihoodFD,
-        ]:
-            assert all(
-                jnp.array_equal(_frequencies[0], freq) for freq in _frequencies
-            ), (
-                f"All detectors must have the same frequency array for {type(self).__name__}."
-            )
-        else:
-            self.frequency_masks = [
-                jnp.isin(self.frequencies, detector.sliced_frequencies)
-                for detector in detectors
-            ]
+        # Build per-detector frequency masks so every subclass can slice the union
+        # frequency grid down to the range that each specific detector covers.
+        self.frequency_masks = [
+            jnp.isin(self.frequencies, detector.sliced_frequencies)
+            for detector in detectors
+        ]
 
         self.trigger_time = trigger_time
         self.gmst = compute_gmst(self.trigger_time)
@@ -253,8 +243,8 @@ class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         detectors: Sequence[Detector],
         waveform: Waveform,
         fixed_parameters: Optional[dict[str, Float]] = None,
-        f_min: Float = 0,
-        f_max: Float = float("inf"),
+        f_min: float | dict[str, float] = 0.0,
+        f_max: float | dict[str, float] = float("inf"),
         trigger_time: Float = 0,
         tc_range: tuple[Float, Float] = (-0.12, 0.12),
     ) -> None:
@@ -312,22 +302,22 @@ class TimeMarginalizedLikelihoodFD(BaseTransientLikelihoodFD):
         """
 
         log_likelihood = 0.0
-        # Per-frequency integrand 4 h(f) d*(f) / S(f) df  →  <d|h> (d is conjugated)
-        complex_d_inner_h = jnp.zeros_like(self.detectors[0].sliced_frequencies)
-        df = (
-            self.detectors[0].sliced_frequencies[1]
-            - self.detectors[0].sliced_frequencies[0]
-        )
+        # Accumulate per-frequency integrand 4 h(f) d*(f) / S(f) df on the union
+        # frequency grid so detectors with different f_min / f_max ranges each
+        # contribute only at the bins they cover.
+        complex_d_inner_h = jnp.zeros(len(self.frequencies), dtype=jnp.complex128)
         waveform_sky = self.waveform(self.frequencies, params)
-        for ifo in self.detectors:
-            freqs, ifo_data, psd = (
-                ifo.sliced_frequencies,
-                ifo.sliced_fd_data,
-                ifo.sliced_psd,
+        for i, ifo in enumerate(self.detectors):
+            psd = ifo.sliced_psd
+
+            waveform_sky_ifo = {
+                key: waveform_sky[key][self.frequency_masks[i]] for key in waveform_sky
+            }
+            h_dec = ifo.fd_response(ifo.sliced_frequencies, waveform_sky_ifo, params)
+            complex_d_inner_h = complex_d_inner_h.at[self.frequency_masks[i]].add(
+                4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df
             )
-            h_dec = ifo.fd_response(freqs, waveform_sky, params)
-            complex_d_inner_h += 4 * h_dec * jnp.conj(ifo_data) / psd * df
-            optimal_SNR = inner_product(h_dec, h_dec, psd, df)
+            optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
             log_likelihood += -optimal_SNR / 2
 
         # Pad to cover the full frequency range before FFT
@@ -552,25 +542,22 @@ class PhaseTimeMarginalizedLikelihoodFD(TimeMarginalizedLikelihoodFD):
         return self._likelihood(params, data)
 
     def _likelihood(self, params: dict[str, Float], data: dict) -> Float:
-        # Refactored: use self.detectors, self.frequencies, self.tc_array, self.pad_low, self.pad_high, self.tc_range
         log_likelihood = 0.0
-        # Per-frequency integrand 4 h(f) d*(f) / S(f) df  →  <d|h> (d is conjugated)
-        complex_d_inner_h = jnp.zeros_like(self.detectors[0].sliced_frequencies)
-
-        df = (
-            self.detectors[0].sliced_frequencies[1]
-            - self.detectors[0].sliced_frequencies[0]
-        )
+        # Accumulate per-frequency integrand on the union frequency grid; each
+        # detector contributes only at the bins within its frequency range.
+        complex_d_inner_h = jnp.zeros(len(self.frequencies), dtype=jnp.complex128)
         waveform_sky = self.waveform(self.frequencies, params)
-        for ifo in self.detectors:
-            freqs, ifo_data, psd = (
-                ifo.sliced_frequencies,
-                ifo.sliced_fd_data,
-                ifo.sliced_psd,
+        for i, ifo in enumerate(self.detectors):
+            psd = ifo.sliced_psd
+
+            waveform_sky_ifo = {
+                key: waveform_sky[key][self.frequency_masks[i]] for key in waveform_sky
+            }
+            h_dec = ifo.fd_response(ifo.sliced_frequencies, waveform_sky_ifo, params)
+            complex_d_inner_h = complex_d_inner_h.at[self.frequency_masks[i]].add(
+                4 * h_dec * jnp.conj(ifo.sliced_fd_data) / psd * self.df
             )
-            h_dec = ifo.fd_response(freqs, waveform_sky, params)
-            complex_d_inner_h += 4 * h_dec * jnp.conj(ifo_data) / psd * df
-            optimal_SNR = inner_product(h_dec, h_dec, psd, df)
+            optimal_SNR = inner_product(h_dec, h_dec, psd, self.df)
             log_likelihood += -optimal_SNR / 2
 
         # Pad to cover the full frequency range before FFT
@@ -622,8 +609,8 @@ class HeterodynedTransientLikelihoodFD(BaseTransientLikelihoodFD):
         detectors: Sequence[Detector],
         waveform: Waveform,
         fixed_parameters: Optional[dict[str, Float]] = None,
-        f_min: Float = 0,
-        f_max: Float = float("inf"),
+        f_min: float | dict[str, float] = 0.0,
+        f_max: float | dict[str, float] = float("inf"),
         trigger_time: float = 0,
         n_bins: int = 100,
         popsize: int = 100,
@@ -710,12 +697,13 @@ class HeterodynedTransientLikelihoodFD(BaseTransientLikelihoodFD):
             jnp.array([jnp.abs(h_sky[pol]) for pol in h_sky.keys()]), axis=0
         )
         f_valid = frequency_original[jnp.where(h_amp > 0)[0]]
-        f_max = jnp.max(f_valid)
-        f_min = jnp.min(f_valid)
+        f_waveform_max = jnp.max(f_valid)
+        f_waveform_min = jnp.min(f_valid)
 
         # Mask based on center frequencies to keep complete bins
         mask_heterodyne_center = jnp.where(
-            (self.freq_grid_center <= f_max) & (self.freq_grid_center >= f_min)
+            (self.freq_grid_center <= f_waveform_max)
+            & (self.freq_grid_center >= f_waveform_min)
         )[0]
         self.freq_grid_center = self.freq_grid_center[mask_heterodyne_center]
         self.freq_grid_low = self.freq_grid_low[mask_heterodyne_center]
@@ -732,10 +720,12 @@ class HeterodynedTransientLikelihoodFD(BaseTransientLikelihoodFD):
             self.freq_grid_center, self.reference_parameters
         )
 
-        for detector in self.detectors:
-            # Get the reference waveforms
+        for i, detector in enumerate(self.detectors):
+            # Slice the full-grid reference waveform to this detector's frequency
+            # range so that detectors with different f_min/f_max are handled correctly.
+            h_sky_ifo = {key: h_sky[key][self.frequency_masks[i]] for key in h_sky}
             waveform_ref = detector.fd_response(
-                frequency_original, h_sky, self.reference_parameters
+                detector.sliced_frequencies, h_sky_ifo, self.reference_parameters
             )
             self.waveform_low_ref[detector.name] = detector.fd_response(
                 self.freq_grid_low, h_sky_low, self.reference_parameters
@@ -747,7 +737,7 @@ class HeterodynedTransientLikelihoodFD(BaseTransientLikelihoodFD):
                 detector.sliced_fd_data,
                 waveform_ref,
                 detector.sliced_psd,
-                frequency_original,
+                detector.sliced_frequencies,
                 freq_grid,
                 self.freq_grid_center,
             )
