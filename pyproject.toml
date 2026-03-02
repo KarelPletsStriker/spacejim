@@ -47,12 +47,6 @@ docs = [
 cuda = [
     "jax[cuda]>=0.8.2",
 ]
-dagster = [
-    "dagster>=1.11.1",
-    "dagster-dg-cli>=1.11.1",
-    "dagster-pipes>=1.11.1",
-    "dagster-webserver>=1.11.1",
-]
 
 [dependency-groups]
 dev = [
@@ -69,12 +63,6 @@ dev = [
 
 [tool.uv.sources]
 jimgw = { workspace = true }
-
-[tool.dagster]
-modules = [
-{ type="module", name="jim_dagster.InjectionRecovery.definitions" },
-{ type="module", name="jim_dagster.RealDataCatalog.definitions" },
-]
 
 [build-system]
 requires = ["hatchling"]
