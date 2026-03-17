@@ -28,6 +28,7 @@ dependencies = [
     "jax>=0.8.2",
     "jaxtyping>=0.3.3",
     "ripplegw>=0.0.9",
+	"jaxgb>=0.2.0",
 ]
 
 [project.optional-dependencies]
