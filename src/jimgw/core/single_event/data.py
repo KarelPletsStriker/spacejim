@@ -292,7 +292,7 @@ class Data(ABC):
         Returns:
             Data: Data object with the Fourier and time domain data.
         """
-        assert fd_strain.shape == frequencies.shape, (
+        assert fd_strain.shape[-1] == frequencies.shape[-1], (
             "Frequency and data arrays must have the same length"
         )
         f_nyq = frequencies[-1]
