@@ -19,24 +19,18 @@ from jimgw.core.single_event.data import Data, PowerSpectrum
 from jimgw.core.single_event.utils import inner_product, complex_inner_product
 from jimgw.core.single_event.detector import Detector
 
-class SpaceBased(Detector):
-    """Object representing a ground-based detector.
+import lisaorbits
+from jaxgb.jaxgb import JaxGB
+from jaxgb.params import GBObject
 
-    Contains information about the location and orientation of the detector on Earth,
+class SpaceBasedGB(Detector):
+    """Object representing a space-based detector, specifically for galactic binaries.
+
+    Contains information about the orbit and detector parameters in the solar system,
     as well as actual strain data and the PSD of the associated noise.
 
     Attributes:
         name (str): Name of the detector.
-        latitude (Float): Latitude of the detector in radians.
-        longitude (Float): Longitude of the detector in radians.
-        xarm_azimuth (Float): Azimuth of the x-arm in radians.
-        yarm_azimuth (Float): Azimuth of the y-arm in radians.
-        xarm_tilt (Float): Tilt of the x-arm in radians.
-        yarm_tilt (Float): Tilt of the y-arm in radians.
-        elevation (Float): Elevation of the detector in meters.
-        polarization_mode (list[Polarization]): List of polarization modes (`pc` for plus and cross) to be used in
-            computing antenna patterns; in the future, this could be expanded to
-            include non-GR modes.
         data (Data): Array of Fourier-domain strain data.
         psd (PowerSpectrum): Power spectral density object.
     """
@@ -44,14 +38,10 @@ class SpaceBased(Detector):
     polarization_mode: list[Polarization]
     data: Data
     psd: PowerSpectrum
-
-    latitude: Float = 0
-    longitude: Float = 0
-    xarm_azimuth: Float = 0
-    yarm_azimuth: Float = 0
-    xarm_tilt: Float = 0
-    yarm_tilt: Float = 0
-    elevation: Float = 0
+    channel: str
+    t_init: Float = 1.0e3
+    t0: Float = 1.0e4
+    n_freqs: int = 2000
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.name})"
@@ -59,92 +49,75 @@ class SpaceBased(Detector):
     def __init__(
         self,
         name: str,
-        latitude: float = 0,
-        longitude: float = 0,
-        elevation: float = 0,
-        xarm_azimuth: float = 0,
-        yarm_azimuth: float = 0,
-        xarm_tilt: float = 0,
-        yarm_tilt: float = 0,
-        modes: str = "pc",
+        orbit: str,
+        tdi_channel: str,
+        t_obs: float,
+        num_freqs: int,
+        t_init: float,
+        t0: float,
+        P_noise: Float[Array],
+        A_noise: Float[Array],
+        **kwargs
     ):
         """Initialize a ground-based detector.
 
         Args:
             name (str): Name of the detector.
-            latitude (float, optional): Latitude of the detector in radians. Defaults to 0.
-            longitude (float, optional): Longitude of the detector in radians. Defaults to 0.
-            elevation (float, optional): Elevation of the detector in meters. Defaults to 0.
-            xarm_azimuth (float, optional): Azimuth of the x-arm in radians. Defaults to 0.
-            yarm_azimuth (float, optional): Azimuth of the y-arm in radians. Defaults to 0.
-            xarm_tilt (float, optional): Tilt of the x-arm in radians. Defaults to 0.
-            yarm_tilt (float, optional): Tilt of the y-arm in radians. Defaults to 0.
-            modes (str, optional): Polarization modes. Defaults to "pc".
+            
         """
         super().__init__()
 
         self.name = name
-
-        self.latitude = latitude
-        self.longitude = longitude
-        self.elevation = elevation
-        self.xarm_azimuth = xarm_azimuth
-        self.yarm_azimuth = yarm_azimuth
-        self.xarm_tilt = xarm_tilt
-        self.yarm_tilt = yarm_tilt
-
-        self.polarization_mode = [Polarization(m) for m in modes]
+        self.orbit_name = orbit
+        self.tdi_channel = tdi_channel
+        
+        self.num_freqs = num_freqs
+        self.t_obs = t_obs
+        self.t_init = t_init
+        self.t0 = t0
         self.data = Data()
         self.psd = PowerSpectrum()
 
-    @staticmethod
-    def _get_arm(
-        lat: Float, lon: Float, tilt: Float, azimuth: Float
-    ) -> Float[Array, "3"]:
-        """Construct detector-arm vectors in geocentric Cartesian coordinates.
+        self.P_noise_params = P_noise
+        self.A_noise_params = A_noise
 
-        Args:
-            lat (Float): Vertex latitude in radians.
-            lon (Float): Vertex longitude in radians.
-            tilt (Float): Arm tilt in radians.
-            azimuth (Float): Arm azimuth in radians.
+        if self.orbit_name == 'equal':
+            self.orbits = lisaorbits.EqualArmlengthOrbits()
+        elif self.orbit_name == 'kepler':
+            self.orbits = lisaorbits.KeplerianOrbits()
+        else:
+            raise NotImplementedError
+        
+        self.myjaxgb = myjaxgb = JaxGB(self.orbits, t_obs=self.t_obs, t0=self.t0, n=self.num_freqs)
+    
+    def get_params(
+        self,
+        params: dict[str, Float]
+    ) -> Float[Array]:
+        f0,fdot,A,ra,dec,psi,iota,phi0, = params['f0'],params['fdot'],params['A'],params['ra'],params['dec'],params['psi'],params['iota'],params['phi0'],                
+        f0_t0 = f0 - fdot * (self.t_init - self.t0)
+        # shift `phi0`, to account for difference `t_init` (catalogue epoch) and `t0`
+        _shift = jnp.pi * (
+            2 * f0 * (self.t_init - self.t0) - fdot * (self.t_init - self.t0) ** 2
+            )
+        phi0_t0 = (phi0 + _shift) % (2 * jnp.pi)
 
-        Returns:
-            Float[Array, "3"]: Detector arm vector in geocentric Cartesian coordinates.
-        """
-
-    @property
-    def arms(self) -> tuple[Float[Array, "3"], Float[Array, "3"]]:
-        """Get the detector arm vectors.
-
-        Returns:
-            tuple[Float[Array, "3"], Float[Array, "3"]]: A tuple containing:
-                - x: X-arm vector in geocentric Cartesian coordinates
-                - y: Y-arm vector in geocentric Cartesian coordinates
-        """
-
-
-    @property
-    def tensor(self) -> Float[Array, "3 3"]:
-        """Get the detector tensor defining the strain measurement.
-
-        For a 2-arm differential-length detector, this is given by:
-
-        .. math::
-
-            D_{ij} = \\left(x_i x_j - y_i y_j\\right)/2
-
-        for unit vectors :math:`x` and :math:`y` along the x and y arms.
-
-        Returns:
-            Float[Array, "3 3"]: The 3x3 detector tensor in geocentric coordinates.
-        """
-      raise NotImplemented
+        return jnp.array(
+            [
+                f0_t0,  # shifted f0
+                fdot,
+                A,
+                ra,
+                dec,
+                psi,
+                iota,
+                phi0_t0,  # shifted phi0
+            ]
+        ).T
 
     def fd_response(
         self,
         frequency: Float[Array, " n_sample"],
-        h_sky: dict[str, Float[Array, " n_sample"]],
         params: dict[str, Float],
         **kwargs,
     ) -> Complex[Array, " n_sample"]:
@@ -159,31 +132,21 @@ class SpaceBased(Detector):
                 - ra (Float): Right ascension in radians
                 - dec (Float): Declination in radians
                 - psi (Float): Polarization angle in radians
-                - trigger_time (Float): The trigger time in sec
-                - t_c (Float): The difference between peak time and trigger time in sec
-                - gmst (Float): The greenwich mean sidereal time at the trigger time in radian
             **kwargs: Additional keyword arguments.
 
         Returns:
             Array: Complex strain measured by the detector in frequency domain, obtained by
                   combining the antenna patterns for each polarization mode.
         """
-        ra, dec, psi, gmst = params["ra"], params["dec"], params["psi"], params["gmst"]
-        antenna_pattern = self.antenna_pattern(ra, dec, psi, gmst)
-        time_shift = self.delay_from_geocenter(ra, dec, gmst)
-        time_shift += params["trigger_time"] - self.epoch + params["t_c"]
 
-        h_detector = jax.tree_util.tree_map(
-            lambda h, antenna: h * antenna,
-            h_sky,
-            antenna_pattern,
-        )
-        projected_strain = jnp.sum(
-            jnp.stack(jax.tree_util.tree_leaves(h_detector)), axis=0
-        )
+        wave_params = self.get_params(params)
 
-        phase_shift = jnp.exp(-2j * jnp.pi * frequency * time_shift)
-        return projected_strain * phase_shift
+        if self.tdi_channel == 'AE':
+            response = jnp.asarray(myjaxgb.get_tdi(wave_params, tdi_generation = self.tdi_gen, tdi_combination = self.tdi_channel )[:-1])
+        else:
+            response = jnp.asarray(myjaxgb.get_tdi(wave_params, tdi_generation = self.tdi_gen, tdi_combination = self.tdi_channel ))
+        
+        return response
 
     def td_response(
         self,
@@ -206,7 +169,7 @@ class SpaceBased(Detector):
         raise NotImplementedError
 
     @jaxtyped(typechecker=typechecker)
-    def load_and_set_psd(self, psd_file: str = "", asd_file: str = "") -> PowerSpectrum:
+    def load_and_set_psd(self, freqs,) -> PowerSpectrum:
         """Load power spectral density (PSD) from file or default GWTC-2 catalog,
             and set it to the detector.
 
@@ -216,22 +179,6 @@ class SpaceBased(Detector):
         Returns:
             Float[Array, "n_sample"]: Array of PSD values of the detector.
         """
-        if psd_file != "":
-            f, psd_vals = loadtxt(psd_file, unpack=True)
-        elif asd_file != "":
-            f, asd_vals = loadtxt(asd_file, unpack=True)
-            psd_vals = asd_vals**2
-        else:
-            logger.info("Grabbing GWTC-2 PSD for " + self.name)
-            url = asd_file_dict[self.name]
-            data = requests.get(url)
-            tmp_file_name = f"fetched_default_asd_{self.name}.txt"
-            open(tmp_file_name, "wb").write(data.content)
-            f, asd_vals = loadtxt(tmp_file_name, unpack=True)
-            psd_vals = asd_vals**2
-
-        _loaded_psd = PowerSpectrum(psd_vals, f, name=f"{self.name}_psd")
-        self.set_psd(_loaded_psd)
         return self.psd
 
     def _equal_data_psd_frequencies(self) -> Bool:
@@ -294,10 +241,6 @@ class SpaceBased(Detector):
 
     def inject_signal(
         self,
-        duration: float,
-        sampling_frequency: float,
-        epoch: float,
-        waveform_model,
         parameters: dict[str, float],
         is_zero_noise: bool = False,
         rng_key: Optional[Key] = None,
@@ -371,56 +314,26 @@ class SpaceBased(Detector):
         logger.info(f"  - Optimal SNR: {optimal_snr:.4f}")
         logger.info(f"  - Match filtered SNR: {match_filtered_snr:.4f}")
 
-    def get_whitened_frequency_domain_strain(
-        self, frequency_series: Complex[Array, " n_freq"]
-    ) -> Complex[Array, " n_freq"]:
-        """Get the whitened frequency-domain strain.
-        Args:
-            frequency_series (Complex[Array, "n_freq"]): Array of frequency domain data/signal.
-        Returns:
-            Complex[Array, "n_freq"]: Whitened frequency-domain strain.
-        """
-        scaled_asd = jnp.sqrt(self.psd.values * self.duration / 4)
-        return (frequency_series / scaled_asd) * self.frequency_mask
+        
+        
+def S_ij_TM(f, A = 1):
+        
+    # write everything in SI units
+    c = 299792458 #m/s
+    pi = jnp.pi
+    
+    S = A**2 * 1e-30 * (1 + ( 4e-4 / f )**2) * (1 + (f/8e-3)**4) / (2*pi*c*f)**2
 
-    def whitened_frequency_to_time_domain_strain(
-        self, whitened_frequency_series: Complex[Array, " n_time // 2 + 1"]
-    ) -> Float[Array, " n_time"]:
-        """Get the whitened frequency-domain strain.
-        Args:
-            whitened_frequency_series (Complex[Array, "n_time // 2 + 1"]):
-                Array of whitened frequency domain data/signal.
-        Returns:
-            Float[Array, "n_time"]: Whitened time-domain strain/signal.
-        """
-        freq_mask_ratio = len(self.frequency_mask) / jnp.sqrt(
-            jnp.sum(self.frequency_mask)
-        )
-        return jnp.fft.irfft(whitened_frequency_series) * freq_mask_ratio
+    return S
 
-    @property
-    def whitened_frequency_domain_data(self) -> Complex[Array, " n_sample"]:
-        """Get the whitened frequency-domain data.
+# Optical Metrology System (OMS) noise PSD
+def S_ij_OMS(f, P = 1):
+        
+    # write everything in SI units
+    c = 299792458 #m/s
+    pi = jnp.pi
+    
+    S = P**2 *1e-24 * (1 + ( 2e-3 / f )**4) * (2*pi*f/c)**2
 
-        Args:
-            frequency (Float[Array, "n_sample"]): Array of frequency samples.
+    return S
 
-        Returns:
-            Float[Array, "n_sample"]: Whitened frequency-domain data.
-        """
-
-        return self.get_whitened_frequency_domain_strain(self.data.fd)
-
-    @property
-    def whitened_time_domain_data(self) -> Float[Array, " n_sample"]:
-        """Get the whitened time-domain data.
-
-        Args:
-            time (Float[Array, "n_sample"]): Array of time samples.
-
-        Returns:
-            Float[Array, "n_sample"]: Whitened time-domain data.
-        """
-        return self.whitened_frequency_to_time_domain_strain(
-            self.whitened_frequency_domain_data
-        )
